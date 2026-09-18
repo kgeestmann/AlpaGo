@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#147a82">
+<meta name="description" content="AlpaGo builds an optimised day route through any city from real OpenStreetMap places.">
+<title>AlpaGo</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ══════════════ PLAN ══════════════ -->
+  <section class="screen is-active" id="screen-plan">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-alpa">Alpa</span><span class="brand-go">Go</span><span class="brand-pin" aria-hidden="true"></span>
+      </div>
+      <p class="tagline">Don't plan your day. Live it.</p>
+    </header>
+
+    <div class="scroll">
+      <div class="card">
+        <label class="field-label" for="city-input">Where are you?</label>
+        <div class="city-row">
+          <div class="autocomplete">
+            <input id="city-input" type="search" autocomplete="off" placeholder="Search a city or address" enterkeyhint="search">
+            <ul id="city-results" class="ac-list" hidden></ul>
+          </div>
+          <button id="locate-btn" class="icon-btn" title="Use my location" aria-label="Use my location">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 100 8 4 4 0 000-8zm0-6v3m0 14v3M2 12h3m14 0h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+        </div>
+        <p id="city-chosen" class="chosen" hidden></p>
+      </div>
+
+      <div class="card">
+        <div class="field-label">How long have you got?</div>
+        <div class="slider-row">
+          <input id="hours" type="range" min="2" max="12" step="0.5" value="5">
+          <output id="hours-out" class="slider-out">5 h</output>
+        </div>
+        <div class="split">
+          <div>
+            <label class="field-label sm" for="start-time">Starting at</label>
+            <input id="start-time" type="time" value="10:00">
+          </div>
+          <div>
+            <label class="field-label sm" for="pace">Pace</label>
+            <select id="pace">
+              <option value="relaxed">Relaxed</option>
+              <option value="normal" selected>Normal</option>
+              <option value="packed">Packed</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="field-label">What are you into?</div>
+        <div id="interests" class="chips"></div>
+      </div>
+
+      <div class="card">
+        <div class="field-label">Getting around</div>
+        <div id="mobility" class="segmented">
+          <button type="button" class="seg is-on" data-mobility="foot">On foot</button>
+          <button type="button" class="seg" data-mobility="transit">Public transport</button>
+          <button type="button" class="seg" data-mobility="accessible">Step-free</button>
+        </div>
+      </div>
+
+      <div class="card" id="wish-card">
+        <label class="field-label" for="wish">Anything specific? <span class="muted-tag" id="wish-tag">needs a Claude key</span></label>
+        <textarea id="wish" rows="2" placeholder="e.g. somewhere quiet with good coffee, avoid crowds"></textarea>
+      </div>
+
+      <button id="generate-btn" class="primary-btn">Build my day</button>
+      <p class="footnote">Places come from OpenStreetMap contributors. Nothing leaves your phone except the map and place lookups.</p>
+    </div>
+  </section>
+
+  <!-- ══════════════ ROUTE ══════════════ -->
+  <section class="screen" id="screen-route">
+    <div id="map"></div>
+    <div class="route-sheet">
+      <div class="sheet-grip" aria-hidden="true"></div>
+      <div class="route-head">
+        <div>
+          <h2 id="route-title">Your day</h2>
+          <p id="route-meta" class="route-meta"></p>
+        </div>
+        <div class="route-actions">
+          <button id="save-btn" class="ghost-btn" title="Save this route">Save</button>
+          <button id="regen-btn" class="ghost-btn" title="Build a different route">Shuffle</button>
+        </div>
+      </div>
+      <p id="route-intro" class="route-intro" hidden></p>
+      <ol id="timeline" class="timeline"></ol>
+      <div class="route-foot">
+        <button id="maps-btn" class="secondary-btn">Open in Google Maps</button>
+        <button id="new-plan-btn" class="ghost-btn wide">Plan a different day</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ SAVED ══════════════ -->
+  <section class="screen" id="screen-saved">
+    <header class="topbar sub"><h2>Saved routes</h2></header>
+    <div class="scroll"><div id="saved-list" class="saved-list"></div></div>
+  </section>
+
+  <!-- ══════════════ MORE ══════════════ -->
+  <section class="screen" id="screen-more">
+    <header class="topbar sub"><h2>Settings</h2></header>
+    <div class="scroll">
+      <div class="card">
+        <div class="field-label">Claude API key <span class="muted-tag">optional</span></div>
+        <p class="hint">Without a key AlpaGo works fine — descriptions come from Wikipedia. With a key it also writes a short intro for each day and understands free-text wishes. The key is stored only on this device and sent only to api.anthropic.com.</p>
+        <input id="api-key" type="password" autocomplete="off" placeholder="sk-ant-…">
+        <label class="field-label sm" for="api-model">Model</label>
+        <input id="api-model" type="text" placeholder="claude-haiku-4-5">
+        <div class="split">
+          <button id="save-key-btn" class="secondary-btn">Save key</button>
+          <button id="test-key-btn" class="ghost-btn">Test</button>
+        </div>
+        <p id="key-status" class="hint"></p>
+      </div>
+
+      <div class="card">
+        <div class="field-label">Home base <span class="muted-tag">optional</span></div>
+        <p class="hint">A route can end where it started — useful if you're coming back to a hotel.</p>
+        <label class="switch"><input id="loop-route" type="checkbox"><span>Return to the starting point</span></label>
+      </div>
+
+      <div class="card">
+        <div class="field-label">Data</div>
+        <button id="clear-cache-btn" class="ghost-btn wide">Clear cached place lookups</button>
+        <button id="clear-saved-btn" class="ghost-btn wide danger">Delete all saved routes</button>
+      </div>
+
+      <div class="card about">
+        <div class="field-label">About</div>
+        <p class="hint">AlpaGo <span id="app-version"></span> — a personal build.<br>
+        Places &amp; map: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors.<br>
+        Search: Photon (Komoot). Walking times: OSRM. Descriptions: Wikipedia.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ TAB BAR ══════════════ -->
+  <nav class="tabbar">
+    <button class="tab is-on" data-screen="plan">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-6.2 7-11a7 7 0 10-14 0c0 4.8 7 11 7 11z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      <span>Plan</span>
+    </button>
+    <button class="tab" data-screen="route">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19c6 0 4-7 9-7s5-7 5-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="3 3"/><circle cx="5" cy="19" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="19" cy="5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      <span>Route</span>
+    </button>
+    <button class="tab" data-screen="saved">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10a1 1 0 011 1v15l-6-4-6 4V5a1 1 0 011-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      <span>Saved</span>
+    </button>
+    <button class="tab" data-screen="more">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+      <span>More</span>
+    </button>
+  </nav>
+
+  <!-- ══════════════ OVERLAYS ══════════════ -->
+  <div id="loader" class="loader" hidden>
+    <div class="loader-box">
+      <div class="alpaca-walk" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p id="loader-text">Looking around…</p>
+    </div>
+  </div>
+
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-inner">
+      <button id="sheet-close" class="sheet-close" aria-label="Close">&times;</button>
+      <div id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+</div>
+
+<script src="vendor/leaflet.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
