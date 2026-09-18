@@ -8,7 +8,7 @@ import { describePlace, routeIntro, interpretWish, hasKey, testKey } from './enr
 import * as map from './map.js';
 import * as ui from './ui.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.2';
 const $ = (sel) => document.querySelector(sel);
 
 /* Everything about the current, unsaved plan lives here. */
@@ -20,6 +20,7 @@ const session = {
   intro: null,
   excluded: new Set(),
   lastQuery: null,   // the options that produced `candidates`
+  controller: null,  // aborts the in-flight lookup
 };
 
 /* ════════════════ navigation ════════════════ */
@@ -168,6 +169,11 @@ async function generate({ jitter = 0, keepCandidates = false } = {}) {
     return;
   }
 
+  // One lookup at a time; a second tap replaces the first rather than racing it.
+  session.controller?.abort();
+  const controller = new AbortController();
+  session.controller = controller;
+
   const s = settings.all();
   const opts = {
     interests: s.interests.length ? s.interests : ['sights'],
@@ -176,9 +182,12 @@ async function generate({ jitter = 0, keepCandidates = false } = {}) {
     pace: s.pace,
     startTime: s.startTime,
     loop: s.loopRoute,
+    signal: controller.signal,
+    onProgress: () =>
+      ui.loadingNote('the main map server is slow — asking the backups too'),
   };
 
-  ui.loading(true, 'Reading the map…');
+  ui.loading(true, 'Reading the map…', () => controller.abort());
 
   try {
     // A free-text wish can override the chips, but only when a key is set.
@@ -242,9 +251,11 @@ async function generate({ jitter = 0, keepCandidates = false } = {}) {
       });
     }
   } catch (err) {
+    if (err.name === 'AbortError') return; // the user pressed Cancel
     console.error(err);
     ui.toast(err.message || 'Something went wrong building the route');
   } finally {
+    if (session.controller === controller) session.controller = null;
     ui.loading(false);
   }
 }

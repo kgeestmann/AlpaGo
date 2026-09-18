@@ -8,10 +8,19 @@
 import { haversine } from './geo.js';
 import { cache } from './state.js';
 
-const ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
+/* Measured from a phone in Sweden, September 2026: overpass-api.de answered a
+ * Malmo query in 0.5 s, then 504'd a trivial one a minute later, then took 34 s
+ * on a third. The public instances are healthy and overloaded by turns, which
+ * is why this file fans out rather than trusting any single one.
+ *
+ * overpass.osm.ch is deliberately absent: it answers fast with 200 OK and zero
+ * elements outside Switzerland, which is worse than failing. overpass.osm.jp
+ * sends no CORS headers, so a browser can never read it. */
+const PRIMARY = 'https://overpass-api.de/api/interpreter';
+const BACKUPS = [
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 
 /* Each interest maps to a set of Overpass tag filters, plus how long a
@@ -69,7 +78,7 @@ export const CATEGORIES = {
     weight: 0.9,
     filters: [
       '["tourism"="viewpoint"]',
-      '["man_made"="bridge"]["name"]',
+      '["man_made"="bridge"]',
       '["man_made"="pier"]',
       '["man_made"="lighthouse"]',
     ],
@@ -111,45 +120,135 @@ export const FOOD_CATEGORIES = new Set(['food', 'nightlife']);
 /* ── Overpass ─────────────────────────────── */
 
 function buildQuery(center, radiusM, interests) {
-  const parts = [];
+  // Three things keep this query cheap, which matters because Overpass is a
+  // shared, donation-funded service and a fat query can take a minute:
+  //   `nwr`      one statement for nodes, ways and relations instead of two
+  //              or three ("center" still gives each one a single coordinate);
+  //   ["name"]   we discard unnamed objects anyway, and this throws away the
+  //              overwhelming majority of matches server-side rather than
+  //              shipping them over a phone connection first;
+  //   the Set    categories overlap (viewpoints are in both Landmarks and
+  //              Views; markets in both Food and Shopping) and a duplicated
+  //              filter is a duplicated scan.
+  const around = `(around:${radiusM},${center.lat.toFixed(5)},${center.lon.toFixed(5)})`;
+  const filters = new Set();
   for (const key of interests) {
-    const cat = CATEGORIES[key];
-    if (!cat) continue;
-    for (const f of cat.filters) {
-      // node + way: a park is a way, a statue is a node. `center` gives us a
-      // single coordinate for ways so downstream code can treat them alike.
-      parts.push(`node${f}(around:${radiusM},${center.lat},${center.lon});`);
-      parts.push(`way${f}(around:${radiusM},${center.lat},${center.lon});`);
-    }
+    for (const f of CATEGORIES[key]?.filters || []) filters.add(f);
   }
-  return `[out:json][timeout:35];(${parts.join('')});out center tags 400;`;
+  const parts = [...filters].map((f) => `nwr${f}["name"]${around};`);
+  return `[out:json][timeout:25];(${parts.join('')});out center 350;`;
 }
 
-async function runOverpass(query, signal) {
-  let lastError = null;
-  for (const endpoint of ENDPOINTS) {
+/* A server that stops answering must not hang the app, and a server that
+ * answers "" must not be mistaken for "there is nothing here". Both were real
+ * failures: a silent 25-second stall, and an empty result set that was actually
+ * an Overpass timeout carrying a `remark` this code used to ignore. */
+const PRIMARY_TIMEOUT_MS = 9000;
+const BACKUP_TIMEOUT_MS = 16000;
+
+const hostOf = (url) => new URL(url).hostname;
+
+function askOverpass(url, query, signal, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const relay = () => controller.abort();
+  signal?.addEventListener('abort', relay, { once: true });
+
+  const promise = fetch(url, {
+    method: 'POST',
+    body: 'data=' + encodeURIComponent(query),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`${hostOf(url)} returned ${res.status}`);
+      const data = await res.json();
+      // Overpass reports its own timeouts and rate limits in-band, with a 200
+      // and an empty element list. Without this check that reads as "this city
+      // has nothing in it".
+      if (data.remark) throw new Error(`${hostOf(url)}: ${data.remark}`);
+      return data;
+    })
+    .catch((err) => {
+      // Our own deadline and the user pressing Cancel both arrive as an
+      // AbortError. Only the second one may stay an AbortError — otherwise a
+      // timed-out server is mistaken for a cancellation and the app gives up
+      // without saying anything, which is exactly how a silent failure looks.
+      if (signal?.aborted) throw err;
+      if (err.name === 'AbortError') throw new Error(`${hostOf(url)} stopped responding`);
+      throw err;
+    })
+    .finally(() => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', relay);
+    });
+
+  return { promise, abort: () => controller.abort() };
+}
+
+/** Resolve with the first answer that actually has places in it. An empty but
+ *  valid answer is held as a fallback rather than winning the race, because a
+ *  regional mirror outside its own region answers empty in milliseconds. */
+function firstUsable(attempts, signal) {
+  return new Promise((resolve, reject) => {
+    let outstanding = attempts.length;
+    let empty = null;
+    let lastError = null;
+    let done = false;
+
+    const finish = (fn, value) => {
+      if (done) return;
+      done = true;
+      for (const a of attempts) a.abort();
+      fn(value);
+    };
+
+    for (const attempt of attempts) {
+      attempt.promise
+        .then((data) => {
+          if (data.elements?.length) finish(resolve, data);
+          else empty = empty || data;
+        })
+        .catch((err) => { lastError = err; })
+        .finally(() => {
+          if (--outstanding > 0 || done) return;
+          if (signal?.aborted) finish(reject, new DOMException('cancelled', 'AbortError'));
+          else if (empty) finish(resolve, empty);
+          else finish(reject, lastError || new Error('No map data server answered'));
+        });
+    }
+  });
+}
+
+async function runOverpass(query, signal, onProgress) {
+  if (signal?.aborted) throw new DOMException('cancelled', 'AbortError');
+
+  // Happy path: one request to one server. Only when that is slow or unwell do
+  // we bother the others — fanning out on every lookup would be rude to
+  // services that run on donations.
+  try {
+    return await firstUsable([askOverpass(PRIMARY, query, signal, PRIMARY_TIMEOUT_MS)], signal);
+  } catch (err) {
+    if (signal?.aborted) throw new DOMException('cancelled', 'AbortError');
+
+    onProgress?.(err);
+
+    // All of them at once, not one after another. Sequential fallbacks were the
+    // bug the user saw: two dead mirrors at 22 seconds each meant a minute of
+    // spinner before the third was even tried.
+    const attempts = [PRIMARY, ...BACKUPS].map((url) =>
+      askOverpass(url, query, signal, BACKUP_TIMEOUT_MS)
+    );
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        body: 'data=' + encodeURIComponent(query),
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal,
-      });
-      if (res.status === 429 || res.status === 504) {
-        lastError = new Error('The map data service is busy');
-        continue; // a different mirror may be idle
-      }
-      if (!res.ok) {
-        lastError = new Error('Map data service returned ' + res.status);
-        continue;
-      }
-      return await res.json();
-    } catch (err) {
-      if (err.name === 'AbortError') throw err;
-      lastError = err;
+      return await firstUsable(attempts, signal);
+    } catch (err2) {
+      if (signal?.aborted || err2.name === 'AbortError') throw err2;
+      throw new Error(
+        "OpenStreetMap's data servers are all busy right now. " +
+        'This happens; give it a minute and try again.'
+      );
     }
   }
-  throw lastError || new Error('Could not reach the map data service');
 }
 
 /* ── normalising ──────────────────────────── */
@@ -276,7 +375,7 @@ export function searchRadius(hours, mobility) {
  * Fetch and rank candidate stops around a centre point.
  * Returns places sorted best-first, already deduped and scored.
  */
-export async function findPlaces(center, { interests, hours, mobility, signal }) {
+export async function findPlaces(center, { interests, hours, mobility, signal, onProgress }) {
   const radius = searchRadius(hours, mobility);
 
   // Always query a slightly wider net than the user's interests, so the
@@ -292,7 +391,7 @@ export async function findPlaces(center, { interests, hours, mobility, signal })
 
   let elements = cache.get(cacheKey);
   if (!elements) {
-    const data = await runOverpass(buildQuery(center, radius, queryCats), signal);
+    const data = await runOverpass(buildQuery(center, radius, queryCats), signal, onProgress);
     elements = (data.elements || []).map((el) => ({
       type: el.type, id: el.id, lat: el.lat, lon: el.lon, center: el.center, tags: el.tags,
     }));

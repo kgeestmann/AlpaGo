@@ -138,6 +138,13 @@ committed here on purpose, so the app has no CDN to fail.
   patchier elsewhere.
 - Overpass and OSRM are donation-funded public instances. Lookups are cached for
   a week in `localStorage` partly to be polite to them.
+- **First lookup in a new city takes 5–20 seconds.** The query asks Overpass for
+  every named landmark, museum, park and café in a radius, and that is simply
+  not instant. Repeat visits to the same city are served from cache and are
+  immediate. If the main server hasn't answered within 9 seconds, AlpaGo asks
+  it and three backup servers at once and takes the first useful answer; the
+  loader shows the elapsed time and a Cancel button throughout, so it can never
+  hang silently.
 
 ---
 

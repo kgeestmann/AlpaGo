@@ -27,14 +27,67 @@ export function toast(message, ms = 2600) {
   toastTimer = setTimeout(() => { node.hidden = true; }, ms);
 }
 
-export function loading(on, message = 'Looking around…') {
+/* The loader counts seconds out loud. A spinner that has been going for
+ * twenty seconds with no other signal is indistinguishable from a hang, and
+ * the honest answer — "this is slow, here is how slow, here is the way out" —
+ * is better than pretending everything is fine. */
+let elapsedTimer = null;
+let stickyNote = '';
+
+export function loading(on, message = 'Looking around…', onCancel = null) {
   const node = $('#loader');
+  const cancel = $('#loader-cancel');
+  const note = $('#loader-note');
+
+  clearInterval(elapsedTimer);
+  stickyNote = '';
+  note.hidden = true;
+  note.textContent = '';
+
+  if (!on) {
+    node.hidden = true;
+    cancel.hidden = true;
+    cancel.onclick = null;
+    return;
+  }
+
   $('#loader-text').textContent = message;
-  node.hidden = !on;
+  node.hidden = false;
+
+  if (onCancel) {
+    cancel.hidden = false;
+    cancel.onclick = onCancel;
+  } else {
+    cancel.hidden = true;
+    cancel.onclick = null;
+  }
+
+  const started = Date.now();
+  elapsedTimer = setInterval(() => {
+    const seconds = Math.round((Date.now() - started) / 1000);
+    if (seconds < 6 && !stickyNote) return;
+    const detail = stickyNote
+      || (seconds < 20
+        ? 'first lookup in a city takes a moment'
+        : 'the map data service is slow right now');
+    note.hidden = false;
+    note.textContent = `${seconds}s — ${detail}`;
+  }, 1000);
 }
 
 export function loadingText(message) {
   $('#loader-text').textContent = message;
+}
+
+/* A note that outranks the generic "this is taking a while" text until the
+ * next loading() call clears it. */
+export function loadingNote(message) {
+  stickyNote = message || '';
+  const note = $('#loader-note');
+  if (stickyNote) {
+    note.textContent = stickyNote;
+    note.hidden = false;
+  }
 }
 
 /* ── interest chips ───────────────────────── */

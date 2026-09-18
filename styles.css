@@ -338,6 +338,8 @@ input[type="range"] { flex: 1; accent-color: var(--teal); height: 30px; }
   max-width: 82vw;
 }
 .loader-box p { margin: 14px 0 0; font-size: 14px; font-weight: 600; }
+.loader-note { font-size: 12px !important; font-weight: 500 !important; color: var(--ink-soft); margin-top: 6px !important; }
+#loader-cancel { margin-top: 14px; }
 .alpaca-walk { display: flex; gap: 7px; justify-content: center; }
 .alpaca-walk span {
   width: 11px; height: 11px; border-radius: 50%; background: var(--teal);

@@ -9,7 +9,7 @@
  * never cached here — they are cached in localStorage by state.js, where the
  * app can reason about freshness. */
 
-const VERSION = 'alpago-v1.0.0';
+const VERSION = 'alpago-v1.0.2';
 const SHELL = VERSION + '-shell';
 const TILES = 'alpago-tiles-v1';
 const TILE_CAP = 320;
